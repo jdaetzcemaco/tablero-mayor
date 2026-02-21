@@ -42,16 +42,24 @@ def time_since(iso_str):
 def get_agents():
     try:
         r = requests.get(WEBHOOK_URL, timeout=10)
+        st.write(f"Status: {r.status_code}")
+        st.write(f"Response: {r.text[:200]}")  # show first 200 chars
         r.raise_for_status()
         data = r.json()
-        agents = data if isinstance(data, list) else [data]
+        if isinstance(data, list):
+            agents = data
+        elif isinstance(data, dict) and "agents" in data:
+            agents = data["agents"]
+        else:
+            agents = [data]
+        agents = [a for a in agents if isinstance(a, dict) and a.get("name")]
         return sorted(
-            [a for a in agents if isinstance(a, dict)],
+            agents,
             key=lambda a: STATUS_ORDER.index(a.get("status", "away"))
             if a.get("status") in STATUS_ORDER else 99
         ), None
     except Exception as e:
-        return [], str(e)
+        return [], f"{str(e)} | Response was: {r.text[:100] if 'r' in dir() else 'no response'}"
 
 
 # ─── Header ───────────────────────────────────────────────
