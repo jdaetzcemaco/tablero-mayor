@@ -1,11 +1,12 @@
 import streamlit as st
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import time
 
 # ─── Config ───────────────────────────────────────────────
 WEBHOOK_URL = "https://jcdcemaco.app.n8n.cloud/webhook/agent-status"
 REFRESH_SECONDS = 60
+GT_OFFSET = timedelta(hours=-6)  # Guatemala = UTC-6
 
 STATUS_CONFIG = {
     "available":  {"label": "Disponible",         "icon": "🟢", "color": "#22c55e"},
@@ -16,15 +17,34 @@ STATUS_CONFIG = {
 
 STATUS_ORDER = ["on_call", "busy", "available", "away"]
 
-# ─── Page setup ───────────────────────────────────────────
 st.set_page_config(
     page_title="Tablero Mayor — CEMACO",
     page_icon="📋",
     layout="wide",
 )
 
+st.markdown("""
+<style>
+    .main > div { padding-top: 1rem; }
+    [data-testid="metric-container"] {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 12px;
+        padding: 14px 18px;
+    }
+    @media (min-width: 1400px) {
+        h1 { font-size: 2.8rem !important; }
+        [data-testid="stMetricValue"] { font-size: 2.6rem !important; }
+    }
+    hr { border-color: rgba(255,255,255,0.06) !important; margin: 12px 0 !important; }
+</style>
+""", unsafe_allow_html=True)
 
-# ─── Helpers ──────────────────────────────────────────────
+
+def now_gt():
+    return datetime.now(timezone.utc).astimezone(timezone(GT_OFFSET))
+
+
 def time_since(iso_str):
     if not iso_str:
         return "—"
@@ -44,9 +64,15 @@ def get_agents():
         r = requests.get(WEBHOOK_URL, timeout=10)
         r.raise_for_status()
         data = r.json()
-        agents = data if isinstance(data, list) else [data]
+        if isinstance(data, list):
+            agents = data
+        elif isinstance(data, dict) and "agents" in data:
+            agents = data["agents"]
+        else:
+            agents = [data]
+        agents = [a for a in agents if isinstance(a, dict) and a.get("name")]
         return sorted(
-            [a for a in agents if isinstance(a, dict)],
+            agents,
             key=lambda a: STATUS_ORDER.index(a.get("status", "away"))
             if a.get("status") in STATUS_ORDER else 99
         ), None
@@ -66,13 +92,12 @@ with col_btn:
         st.cache_data.clear()
         st.rerun()
 
-# ─── Load data ────────────────────────────────────────────
 agents, fetch_error = get_agents()
 
 if fetch_error:
     st.error(f"⚠ Error conectando al webhook: {fetch_error}")
 
-# ─── Metrics row ──────────────────────────────────────────
+# ─── Metrics ──────────────────────────────────────────────
 counts = {
     "on_call":   sum(1 for a in agents if a.get("status") == "on_call"),
     "busy":      sum(1 for a in agents if a.get("status") == "busy"),
@@ -88,7 +113,7 @@ m3.metric("🔵 En ticket", counts["busy"])
 m4.metric("🟢 Disponibles", counts["available"])
 m5.metric("🔴 Ausentes", counts["away"])
 
-st.caption(f"Actualizado: {datetime.now().strftime('%H:%M:%S')} · Auto-refresh cada {REFRESH_SECONDS}s")
+st.caption(f"🕐 Guatemala: {now_gt().strftime('%H:%M:%S')} · Auto-refresh cada {REFRESH_SECONDS}s")
 st.divider()
 
 # ─── Filters ──────────────────────────────────────────────
@@ -121,9 +146,17 @@ filtered = [
 
 st.divider()
 
-# ─── Agent grid + detail panel ────────────────────────────
+# ─── Grid layout ──────────────────────────────────────────
 if "selected_agent" not in st.session_state:
     st.session_state.selected_agent = None
+
+total = len(filtered)
+if total <= 2:
+    num_cols = max(total, 1)
+elif total <= 6:
+    num_cols = 3
+else:
+    num_cols = 4
 
 if not filtered:
     st.info("Sin agentes en este estado.")
@@ -134,9 +167,8 @@ else:
         grid_col = st.container()
         detail_col = None
 
-    # ── Agent cards ──
     with grid_col:
-        cols = st.columns(3)
+        cols = st.columns(num_cols)
         for i, agent in enumerate(filtered):
             status = agent.get("status", "away")
             cfg = STATUS_CONFIG.get(status, STATUS_CONFIG["away"])
@@ -146,31 +178,37 @@ else:
             last_active = time_since(agent.get("last_active_at"))
             avail_since = time_since(agent.get("available_since")) if agent.get("available_since") else None
 
-            with cols[i % 3]:
+            with cols[i % num_cols]:
                 with st.container(border=True):
-                    n_col, b_col = st.columns([3, 1])
-                    with n_col:
+                    if tickets_count > 0:
+                        nc, bc = st.columns([4, 1])
+                        nc.markdown(f"**{name}**")
+                        bc.caption(f"🎫 {tickets_count}")
+                    else:
                         st.markdown(f"**{name}**")
-                    with b_col:
-                        if tickets_count > 0:
-                            st.caption(f"🎫 {tickets_count}")
 
                     st.markdown(f"{cfg['icon']} **{cfg['label']}**")
 
                     meta = f"Activo: {last_active}"
                     if avail_since:
-                        meta += f" · Desde: {avail_since}"
+                        meta += f"  ·  Desde: {avail_since}"
                     st.caption(meta)
 
                     is_selected = st.session_state.selected_agent == email
-                    btn_label = "✕ Cerrar" if is_selected else "Ver detalle"
-                    if st.button(btn_label, key=f"btn_{email}", use_container_width=True):
+                    if st.button(
+                        "✕ Cerrar" if is_selected else "Ver detalle",
+                        key=f"btn_{email}",
+                        use_container_width=True
+                    ):
                         st.session_state.selected_agent = None if is_selected else email
                         st.rerun()
 
-    # ── Detail panel ──
+    # ─── Detail panel ─────────────────────────────────────
     if detail_col:
-        agent_data = next((a for a in agents if a.get("email") == st.session_state.selected_agent), None)
+        agent_data = next(
+            (a for a in agents if a.get("email") == st.session_state.selected_agent),
+            None
+        )
         if agent_data:
             with detail_col:
                 with st.container(border=True):
